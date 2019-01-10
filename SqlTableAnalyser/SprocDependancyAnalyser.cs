@@ -12,7 +12,7 @@ namespace SqlDependancyAnalyser
         {
             _connectionString = connectionString;
         }
-        public List<string> FindDependancies(string sprocName)
+        public List<string> FindDependantObjectForSproc(string sprocName)
         {
             var sqlQuery = String.Format(@"
 SELECT OBJECT_NAME(referencing_id) AS sp_name,
@@ -49,6 +49,21 @@ WHERE referencing_id = OBJECT_ID(N'dbo.{0}');
 
             return tableNames;
 
+        }
+
+
+        public SortedSet<string> FindDependantObjectsForSprocs(List<string> sprocNames)
+        {
+            var dependancySet = new SortedSet<string>();
+            
+            foreach (var sprocName in sprocNames)
+            {
+                dependancySet.Add(sprocName);
+                var objNames = FindDependantObjectForSproc(sprocName);
+                dependancySet.UnionWith(objNames);
+            }
+
+            return dependancySet;
         }
     }
 }
