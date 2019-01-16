@@ -1,87 +1,106 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Data;
+using System.Collections.Specialized;
+using System.Configuration;
 using System.IO;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using Newtonsoft.Json;
+using Serilog;
 using SqlTableAnalyser;
 
 namespace SqlDependancyAnalyser
 {
     class Program
     {
-        
         static void Main(string[] args)
         {
-            string sqlConnectionString = "server=;database=;Persist Security Info=True;User ID=;Password=";
-            string diffFilePath = @"C:\src\UAT_LIVE_Diffs.sql";
+            var log = new LoggerConfiguration()
+                .WriteTo.Console()
+                .CreateLogger();
 
-            var apps = new Dictionary<string, string>()
-            {
-                { "UsersPermissions", @"C:\src\planning-users-permissions\UsersPermissions\App_Code\DataAccess.cs"},
-                { "Contacts", @"C:\src\planning-contacts\Contacts\App_Code\DataAccess.cs"},
-                { "Contacts2", @"C:\src\planning-contacts\Contacts\App_Code\ContactsDB.cs"},
-                { "TA", @"C:\src\planning-appraisals\Appraisals\App_Code\DataAccess.cs"},
-                { "Guidelines", @"C:\src\planning-guidelines\Guidelines\App_Code\DataAccess.cs"},
-                { "IP", @"C:\src\planning-interventional-procedures\IP\App_Code\DataAccess.cs"},
-                { "IP2", @"C:\src\planning-interventional-procedures\IP\App_Code\ContactsDB.cs"},
-                { "Diagnostics", @"C:\src\planning-diagnostics\Diagnostics\App_Code\DataAccess.cs"},
-                { "PIP", @"C:\src\planning-pip\PIP\App_Code\DataAccess.cs"},
-                { "SR", @"C:\src\planning-surveillance-reviews\SR\App_Code\DataAccess.cs"},
-                { "AI", @"C:\src\planning-adoptionimpact\AIP\App_Code\DataAccess.cs"},
-                { "Registrations", @"C:\src\planning-registrations\Registrations\App_Code\DataAccess.cs"},
-            };
-            var appDataAccessContent = new Dictionary<string, string>();
-            foreach (var app in apps)
+            var sqlConnectionString = ConfigurationManager.AppSettings.Get("sqlConnectionString");
+            var diffFilePath = ConfigurationManager.AppSettings.Get("diffFilePath");
+            var planningAppsConfig = ConfigurationManager.GetSection("planningApps") as NameValueCollection;
+            var planningApps = new Dictionary<string, string>();
+            var planningAppsDataAccess = new Dictionary<string, string>();
+            var generateRandom = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("generateRandom"));
+            var useGraphDb = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("useGraphDB"));
+
+            planningAppsConfig.AllKeys.ToList().ForEach(planningApp => 
+                planningApps.Add(planningApp, planningAppsConfig[planningApp]));
+
+            log.Information("planningApps to analyse {0}", planningApps.Keys);
+
+            foreach (var app in planningApps)
             {
                 var dataAccess = File.ReadAllText(app.Value);
-                appDataAccessContent.Add(app.Key,dataAccess);
+                planningAppsDataAccess.Add(app.Key,dataAccess);
             }
             var diffFileContent = File.ReadAllText(diffFilePath);
             var sprocNameParser = new SprocNameParser();
             var sprocDepAnalyser = new SprocDependancyAnalyser(sqlConnectionString);
             var dbObjectApps = new Dictionary<string, List<string>>();
 
-            foreach (var dataAccessContent in appDataAccessContent)
+            foreach (var planningAppDataAccess in planningAppsDataAccess)
             {
-                // Step 1 - parse sproc names
-                var sprocNames = sprocNameParser.ParseSprocsNamesFrom(dataAccessContent.Value);
-                Console.WriteLine($"got sproc names for {dataAccessContent.Key}");
-                // Step 2 - find dependent sql objects for sproc
-                var appObjectDependancies = sprocDepAnalyser.FindDependantObjectsForSprocs(sprocNames);
-                Console.WriteLine($"got object dependencies for {dataAccessContent.Key}");
+                // Step 1 - parse stored procedure names
+                var storedProcedureNames = sprocNameParser.ParseSprocsNamesFrom(planningAppDataAccess.Value);
+                log.Information("stored procedure names for {0}: {1}", planningAppDataAccess.Key, storedProcedureNames.Count);
+
+                // Step 2 - find dependent sql objects for stored procedures
+                var appObjectDependancies = sprocDepAnalyser.FindDependantObjectsForSprocs(storedProcedureNames);
+                log.Information("object dependencies for for {0}: {1}", planningAppDataAccess.Key, appObjectDependancies.Count);
+
                 // Step 3 - Find objects that have associated db diffs
                 var objectsWithinDiff = new DiffChecker().FindObjsWithAssociatedDbDiffs(appObjectDependancies, diffFileContent);
-                Console.WriteLine($"got object that are within the diff for {dataAccessContent.Key}");
-                // Step 4 - Add app to object list
+                log.Information("object that are within the diff for {0}: {1}", planningAppDataAccess.Key, objectsWithinDiff.Count);
+                
+                // Step 4 - Add app to db object list
                 foreach (var diffObject in objectsWithinDiff)
                 {
                     if (dbObjectApps.ContainsKey(diffObject))
                     {
-                        dbObjectApps[diffObject].Add(dataAccessContent.Key);
+                        dbObjectApps[diffObject].Add(planningAppDataAccess.Key);
                     }
                     else
                     {
-                        dbObjectApps.Add(diffObject, new List<string> { dataAccessContent.Key });
+                        dbObjectApps.Add(diffObject, new List<string> { planningAppDataAccess.Key });
                     }
                 }
-                Console.WriteLine($"added apps to dbObjectApps for {dataAccessContent.Key}");
+                log.Information("added {0} app to dbObjectApps", planningAppDataAccess.Key);
             }
+            log.Information("db objects: {0}", dbObjectApps.Count);
 
-            Console.WriteLine($"db object counts:{dbObjectApps.Count}");
-
-            string dbObjectAppsOutput = "";
-            foreach (var dbObject in dbObjectApps.OrderBy(x=>x.Key))
+            var serializer = new JsonSerializer {Formatting = Formatting.Indented};
+            using (var sw = new StreamWriter(ConfigurationManager.AppSettings.Get("outputFilePath")))
+            using (JsonWriter writer = new JsonTextWriter(sw))
             {
-                dbObjectAppsOutput = dbObjectAppsOutput +
-                                     $"{dbObject.Key}:{string.Join(", ", dbObject.Value)}";
-                Console.WriteLine($"db object {dbObject.Key} is used in {string.Join(", ", dbObject.Value)}");
+                serializer.Serialize(writer, dbObjectApps);
+            }
+            log.Information("object to app map written to {0}", ConfigurationManager.AppSettings.Get("outputFilePath"));
+
+            if (generateRandom)
+            {
+                var sampleSize = Math.Round(dbObjectApps.Count / (1 + (dbObjectApps.Count * Math.Pow(0.20, 2))));// Slovin formula
+                var randomDbObjectKeyIndexes = new HashSet<int>();
+                //add unique random number to 
+                while (randomDbObjectKeyIndexes.Count != sampleSize)
+                {
+                    randomDbObjectKeyIndexes.Add(new Random().Next(1, dbObjectApps.Count));
+                }
+    
+                var randomDbObjects = randomDbObjectKeyIndexes.ToDictionary(k => k, v => dbObjectApps.Keys.ElementAt(v-1)).OrderBy(x=>x.Key);
+                
+                log.Information("random sample size {0}", sampleSize);
+                log.Information("random DbObject indexes {0}", randomDbObjectKeyIndexes.OrderBy(x => x));
+                log.Information("random DbObjects {0}", randomDbObjects);
             }
 
-            File.WriteAllText(@"C:\src\dbObjectApps.txt", dbObjectAppsOutput);
-
-            Console.ReadKey();
+            if (useGraphDb)
+            {
+                var graphGenerator = new GraphGenerator();
+                graphGenerator.GenerateGraph(planningApps.Keys.ToList(), dbObjectApps);
+            }
         }
     }
 }

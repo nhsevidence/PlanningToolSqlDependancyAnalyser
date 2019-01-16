@@ -11,9 +11,8 @@ namespace SqlTableAnalyser
             var diffObjects =  new SortedSet<string>();
             foreach (var obj in objNames)
             {
-                if (Regex.IsMatch(fileContent, string.Format(@"\b{0}\b", Regex.Escape(obj))))
+                if (Regex.IsMatch(fileContent, $@"\b{Regex.Escape(obj)}\b"))
                 {
-                    Console.WriteLine($"{obj} was found in diff");
                     diffObjects.Add(obj);
                 }
             }
